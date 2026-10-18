@@ -151,13 +151,27 @@ func (w *Watcher) Stop() error {
 }
 
 // SetConfig updates the current configuration
-func (w *Watcher) SetConfig(cfg *config.Config) {
-	cloned := cfg.CloneForRuntime()
-	w.clientsMutex.Lock()
-	defer w.clientsMutex.Unlock()
-	w.config = cloned
-	w.oldConfigYaml, _ = yaml.Marshal(cloned)
-}
+	func (w *Watcher) SetConfig(cfg *config.Config) {
+		enforceLocalSecurityPolicy(cfg)
+		cloned := cfg.CloneForRuntime()
+		w.clientsMutex.Lock()
+		defer w.clientsMutex.Unlock()
+		w.config = cloned
+		w.oldConfigYaml, _ = yaml.Marshal(cloned)
+	}
+
+	// enforceLocalSecurityPolicy forces a loopback bind and disables the remote panel auto-update,
+	// so a local single-user gateway can never be exposed off-host by configuration drift.
+	func enforceLocalSecurityPolicy(cfg *config.Config) {
+		if cfg == nil {
+			return
+		}
+		host := strings.TrimSpace(cfg.Host)
+		if host == "" || host == "0.0.0.0" || host == "::" || host == "[::]" {
+			cfg.Host = "127.0.0.1"
+		}
+		cfg.RemoteManagement.DisableAutoUpdatePanel = true
+	}
 
 // SetPluginAuthParser updates the plugin auth parser used for file auth synthesis.
 func (w *Watcher) SetPluginAuthParser(parser synthesizer.PluginAuthParser) {

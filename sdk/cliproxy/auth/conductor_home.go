@@ -1316,7 +1316,7 @@ func (m *Manager) findAllAntigravityCreditsCandidateAuths(ctx context.Context, r
 		if errHint != nil {
 			return nil, antigravityCreditsKVUnavailableError(errHint)
 		}
-		if okHint && hint.Known {
+		if okHint && hint.Known && (hint.UpdatedAt.IsZero() || time.Since(hint.UpdatedAt) < 1*time.Minute) {
 			if !hint.Available {
 				continue
 			}

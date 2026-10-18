@@ -362,6 +362,11 @@ func antigravityShouldUseCreditsForRequest(ctx context.Context, cfg *config.Conf
 	if cliproxyauth.AntigravityCreditsRequested(ctx) {
 		return true
 	}
+	if auth != nil && strings.TrimSpace(auth.ID) != "" {
+		if hint, ok := cliproxyauth.GetAntigravityCreditsHint(strings.TrimSpace(auth.ID)); ok && hint.Known && !hint.Available && !hint.UpdatedAt.IsZero() && time.Since(hint.UpdatedAt) < antigravityCreditsHintRefreshInterval {
+			return false
+		}
+	}
 	return antigravityIsFreeQuotaExhausted(auth, modelName, time.Now())
 }
 
@@ -387,6 +392,24 @@ func markAntigravityCreditsPermanentlyDisabled(auth *cliproxyauth.Auth) {
 		Known:           true,
 	}
 	storeAntigravityCreditsBalanceBestEffort(authID, bal)
+	cliproxyauth.SetAntigravityCreditsHint(authID, cliproxyauth.AntigravityCreditsHint{
+		Known:           true,
+		Available:       false,
+		CreditAmount:    0,
+		MinCreditAmount: 1,
+		UpdatedAt:       time.Now(),
+	})
+}
+
+func markAntigravityCreditsExhaustedTimed(auth *cliproxyauth.Auth) {
+	if auth == nil || strings.TrimSpace(auth.ID) == "" {
+		return
+	}
+	if !antigravityCoolingDisabled(auth, nil) {
+		markAntigravityCreditsPermanentlyDisabled(auth)
+		return
+	}
+	authID := strings.TrimSpace(auth.ID)
 	cliproxyauth.SetAntigravityCreditsHint(authID, cliproxyauth.AntigravityCreditsHint{
 		Known:           true,
 		Available:       false,
@@ -674,13 +697,21 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalanceForTask(ctx context
 		if !strings.EqualFold(credit.Get("creditType").String(), "GOOGLE_ONE_AI") {
 			continue
 		}
-		creditAmount, errCA := strconv.ParseFloat(strings.TrimSpace(credit.Get("creditAmount").String()), 64)
-		if errCA != nil {
-			continue
+		rawCreditAmount := strings.TrimSpace(credit.Get("creditAmount").String())
+		var creditAmount float64
+		if rawCreditAmount != "" {
+			parsedCA, errCA := strconv.ParseFloat(rawCreditAmount, 64)
+			if errCA != nil {
+				continue
+			}
+			creditAmount = parsedCA
 		}
-		minAmount, errMA := strconv.ParseFloat(strings.TrimSpace(credit.Get("minimumCreditAmountForUsage").String()), 64)
-		if errMA != nil {
-			continue
+		rawMinAmount := strings.TrimSpace(credit.Get("minimumCreditAmountForUsage").String())
+		minAmount := 50.0
+		if rawMinAmount != "" {
+			if parsedMA, errMA := strconv.ParseFloat(rawMinAmount, 64); errMA == nil && parsedMA > 0 {
+				minAmount = parsedMA
+			}
 		}
 		bal := antigravityCreditsBalance{
 			CreditAmount:    creditAmount,

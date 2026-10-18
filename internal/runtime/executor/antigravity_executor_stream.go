@@ -180,9 +180,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 					markAntigravityFreeQuotaExhausted(auth, baseModel, bodyBytes, decision.retryAfter)
 				} else if antigravityHasExplicitCreditsBalanceExhaustedReason(bodyBytes) {
 					clearAntigravityFreeQuotaExhausted(auth, baseModel)
-					if !antigravityCoolingDisabled(auth, e.cfg) {
-						markAntigravityCreditsPermanentlyDisabled(auth)
-					}
+					markAntigravityCreditsExhaustedTimed(auth)
 				}
 			}
 		}

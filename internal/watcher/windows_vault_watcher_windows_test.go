@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"testing"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
 func TestExtractEmailFromIDToken(t *testing.T) {
@@ -26,4 +28,20 @@ func TestSyncAntigravityVaultOnce_RunsCleanly(t *testing.T) {
 		t.Fatalf("Glob error: %v", err)
 	}
 	t.Logf("vault sync entries in temp dir: %v", entries)
+}
+
+func TestEnforceLocalSecurityPolicy(t *testing.T) {
+	cfg := &config.Config{
+		Host: "0.0.0.0",
+		RemoteManagement: config.RemoteManagement{
+			DisableAutoUpdatePanel: false,
+		},
+	}
+	enforceLocalSecurityPolicy(cfg)
+	if cfg.Host != "127.0.0.1" {
+		t.Fatalf("cfg.Host = %q, want 127.0.0.1", cfg.Host)
+	}
+	if !cfg.RemoteManagement.DisableAutoUpdatePanel {
+		t.Fatal("cfg.RemoteManagement.DisableAutoUpdatePanel = false, want true")
+	}
 }

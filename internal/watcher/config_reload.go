@@ -94,6 +94,7 @@ func (w *Watcher) reloadConfig() bool {
 		log.Errorf("failed to reload config: %v", errLoadConfig)
 		return false
 	}
+	enforceLocalSecurityPolicy(newConfig)
 
 	if w.mirroredAuthDir != "" {
 		newConfig.AuthDir = w.mirroredAuthDir

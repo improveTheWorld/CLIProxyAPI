@@ -100,6 +100,9 @@ func syncAntigravityVaultOnce(authDir string) bool {
 	if authDir == "" {
 		return false
 	}
+	if st, err := os.Stat(authDir); err != nil || !st.IsDir() {
+		return false
+	}
 	blob, ok := readWindowsVaultGeneric("gemini:antigravity")
 	if !ok || len(blob) == 0 {
 		return false
