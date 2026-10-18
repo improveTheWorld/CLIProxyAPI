@@ -296,6 +296,9 @@ func antigravityFreeQuotaKey(auth *cliproxyauth.Auth, modelName string) string {
 	if authID == "" || modelName == "" {
 		return ""
 	}
+	if strings.Contains(modelName, "claude") || strings.Contains(modelName, "gpt-oss") {
+		return authID + "|pool:3p-weekly"
+	}
 	return authID + "|" + modelName
 }
 
@@ -401,11 +404,11 @@ func markAntigravityCreditsPermanentlyDisabled(auth *cliproxyauth.Auth) {
 	})
 }
 
-func markAntigravityCreditsExhaustedTimed(auth *cliproxyauth.Auth) {
+func markAntigravityCreditsExhaustedTimed(auth *cliproxyauth.Auth, cfg *config.Config) {
 	if auth == nil || strings.TrimSpace(auth.ID) == "" {
 		return
 	}
-	if !antigravityCoolingDisabled(auth, nil) {
+	if !antigravityCoolingDisabled(auth, cfg) {
 		markAntigravityCreditsPermanentlyDisabled(auth)
 		return
 	}
@@ -456,7 +459,7 @@ func newAntigravityStatusErr(statusCode int, body []byte) statusErr {
 	return err
 }
 func (e *AntigravityExecutor) maybeRefreshAntigravityCreditsHint(ctx context.Context, auth *cliproxyauth.Auth, accessToken string) {
-	if e == nil || auth == nil || !antigravityCreditsRetryEnabled(e.cfg) || antigravityCoolingDisabled(auth, e.cfg) {
+	if e == nil || auth == nil || !antigravityCreditsRetryEnabled(e.cfg) {
 		return
 	}
 	if ctx != nil && ctx.Err() != nil {
@@ -477,6 +480,9 @@ func (e *AntigravityExecutor) maybeRefreshAntigravityCreditsHint(ctx context.Con
 	}
 
 	if client, homeMode, errClient := currentAntigravityKVClient(); homeMode {
+		if antigravityCoolingDisabled(auth, e.cfg) {
+			return
+		}
 		if errClient != nil {
 			log.Errorf("antigravity executor: home kv best-effort refresh lock failed prefix=cpa:antigravity:*: %v", errClient)
 			return
@@ -682,6 +688,14 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalanceForTask(ctx context
 		}
 	}
 	paidTierID := strings.TrimSpace(gjson.GetBytes(bodyBytes, "paidTier.id").String())
+	if antigravityProjectIDFromAuth(auth) == "" {
+		if projID := strings.TrimSpace(gjson.GetBytes(bodyBytes, "cloudaicompanionProject").String()); projID != "" {
+			if auth.Metadata == nil {
+				auth.Metadata = make(map[string]any)
+			}
+			auth.Metadata["project_id"] = projID
+		}
+	}
 
 	credits := gjson.GetBytes(bodyBytes, "paidTier.availableCredits")
 	if !credits.IsArray() {
@@ -729,6 +743,20 @@ func (e *AntigravityExecutor) updateAntigravityCreditsBalanceForTask(ctx context
 		})
 		return
 	}
+	bal := antigravityCreditsBalance{
+		CreditAmount:    0,
+		MinCreditAmount: 50,
+		PaidTierID:      paidTierID,
+		Known:           true,
+	}
+	publish(&bal, cliproxyauth.AntigravityCreditsHint{
+		Known:           true,
+		Available:       false,
+		CreditAmount:    0,
+		MinCreditAmount: 50,
+		PaidTierID:      paidTierID,
+		UpdatedAt:       time.Now(),
+	})
 }
 func antigravityShouldBypassShortCooldown(ctx context.Context, cfg *config.Config) bool {
 	return cliproxyauth.AntigravityCreditsRequested(ctx) && antigravityCreditsRetryEnabled(cfg)

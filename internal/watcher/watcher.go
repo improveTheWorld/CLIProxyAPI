@@ -61,6 +61,7 @@ type Watcher struct {
 	pendingUpdates    map[string]AuthUpdate
 	pendingOrder      []string
 	dispatchCancel    context.CancelFunc
+	platformCancel    context.CancelFunc
 	storePersister    storePersister
 	pluginAuthParser  synthesizer.PluginAuthParser
 	mirroredAuthDir   string
@@ -142,13 +143,16 @@ func NewWatcher(configPath, authDir string, reloadCallback func(*config.Config))
 	}
 
 // Stop stops the file watcher
-func (w *Watcher) Stop() error {
-	w.stopped.Store(true)
-	w.stopDispatch()
-	w.stopConfigReloadTimer()
-	w.stopServerUpdateTimer()
-	return w.watcher.Close()
-}
+	func (w *Watcher) Stop() error {
+		w.stopped.Store(true)
+		if w.platformCancel != nil {
+			w.platformCancel()
+		}
+		w.stopDispatch()
+		w.stopConfigReloadTimer()
+		w.stopServerUpdateTimer()
+		return w.watcher.Close()
+	}
 
 // SetConfig updates the current configuration
 	func (w *Watcher) SetConfig(cfg *config.Config) {

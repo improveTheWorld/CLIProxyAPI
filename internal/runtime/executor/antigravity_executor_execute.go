@@ -172,7 +172,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 				markAntigravityFreeQuotaExhausted(auth, baseModel, bodyBytes, decision.retryAfter)
 			} else if antigravityHasExplicitCreditsBalanceExhaustedReason(bodyBytes) {
 				clearAntigravityFreeQuotaExhausted(auth, baseModel)
-				markAntigravityCreditsExhaustedTimed(auth)
+				markAntigravityCreditsExhaustedTimed(auth, e.cfg)
 			}
 		}
 	}
@@ -394,7 +394,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 					markAntigravityFreeQuotaExhausted(auth, baseModel, bodyBytes, decision.retryAfter)
 				} else if antigravityHasExplicitCreditsBalanceExhaustedReason(bodyBytes) {
 					clearAntigravityFreeQuotaExhausted(auth, baseModel)
-					markAntigravityCreditsExhaustedTimed(auth)
+					markAntigravityCreditsExhaustedTimed(auth, e.cfg)
 				}
 			}
 		}

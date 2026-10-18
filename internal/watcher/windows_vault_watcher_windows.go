@@ -6,10 +6,12 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -21,7 +23,8 @@ import (
 var (
 	modAdvapi32  = syscall.NewLazyDLL("advapi32.dll")
 	procCredRead = modAdvapi32.NewProc("CredReadW")
-	procCredFree = modAdvapi32.NewProc("CredFree")
+procCredFree      = modAdvapi32.NewProc("CredFree")
+procCredEnumerate = modAdvapi32.NewProc("CredEnumerateW")
 )
 
 type winFiletime struct {
@@ -95,16 +98,85 @@ func extractEmailFromIDToken(idToken string) string {
 	return strings.TrimSpace(email)
 }
 
-func syncAntigravityVaultOnce(authDir string) bool {
-	authDir = strings.TrimSpace(authDir)
-	if authDir == "" {
-		return false
+func utf16PtrToString(p *uint16) string {
+	if p == nil {
+		return ""
 	}
-	if st, err := os.Stat(authDir); err != nil || !st.IsDir() {
-		return false
+	end := unsafe.Pointer(p)
+	n := 0
+	for *(*uint16)(end) != 0 && n < 4096 {
+		end = unsafe.Add(end, unsafe.Sizeof(*p))
+		n++
 	}
-	blob, ok := readWindowsVaultGeneric("gemini:antigravity")
-	if !ok || len(blob) == 0 {
+	return syscall.UTF16ToString(unsafe.Slice(p, n))
+}
+
+func enumerateAntigravityVaultBlobs() [][]byte {
+	var count uint32
+	var credsPtr uintptr
+	// CRED_ENUMERATE_ALL_CREDENTIALS = 1
+	r1, _, _ := procCredEnumerate.Call(0, 1, uintptr(unsafe.Pointer(&count)), uintptr(unsafe.Pointer(&credsPtr)))
+	var blobs [][]byte
+	if r1 != 0 && credsPtr != 0 && count > 0 {
+		defer procCredFree.Call(credsPtr)
+		ptrs := unsafe.Slice((*uintptr)(unsafe.Pointer(credsPtr)), count)
+		for _, p := range ptrs {
+			if p == 0 {
+				continue
+			}
+			cred := (*winCredential)(unsafe.Pointer(p))
+			if cred.TargetName == nil || cred.CredentialBlobSize == 0 || cred.CredentialBlob == nil {
+				continue
+			}
+			target := strings.ToLower(utf16PtrToString(cred.TargetName))
+			if !strings.Contains(target, "antigravity") {
+				continue
+			}
+			raw := unsafe.Slice(cred.CredentialBlob, cred.CredentialBlobSize)
+			buf := make([]byte, len(raw))
+			copy(buf, raw)
+			blobs = append(blobs, buf)
+		}
+	}
+	if len(blobs) == 0 {
+		if b, ok := readWindowsVaultGeneric("gemini:antigravity"); ok && len(b) > 0 {
+			blobs = append(blobs, b)
+		}
+	}
+	return blobs
+}
+
+func resolveAntigravityTargetFile(authDir, email string) (string, bool) {
+	if email != "" {
+		exact := filepath.Join(authDir, "antigravity-"+email+".json")
+		if _, err := os.Stat(exact); err == nil {
+			return exact, true
+		}
+		legacy := filepath.Join(authDir, "antigravity.json")
+		if raw, err := os.ReadFile(legacy); err == nil {
+			var prev map[string]any
+			_ = json.Unmarshal(raw, &prev)
+			prevEmail, _ := prev["email"].(string)
+			if strings.TrimSpace(prevEmail) == "" || strings.EqualFold(strings.TrimSpace(prevEmail), email) {
+				return legacy, true
+			}
+		}
+		return exact, true
+	}
+	legacy := filepath.Join(authDir, "antigravity.json")
+	if raw, err := os.ReadFile(legacy); err == nil {
+		var prev map[string]any
+		_ = json.Unmarshal(raw, &prev)
+		prevEmail, _ := prev["email"].(string)
+		if strings.TrimSpace(prevEmail) != "" {
+			return "", false
+		}
+	}
+	return legacy, true
+}
+
+func syncSingleAntigravityBlob(authDir string, blob []byte) bool {
+	if len(blob) == 0 {
 		return false
 	}
 	var vaultData map[string]any
@@ -125,17 +197,19 @@ func syncAntigravityVaultOnce(authDir string) bool {
 		return false
 	}
 
-	fileName := "antigravity.json"
-	if email != "" {
-		fileName = "antigravity-" + email + ".json"
+	targetPath, allowed := resolveAntigravityTargetFile(authDir, email)
+	if !allowed || targetPath == "" {
+		return false
 	}
-	targetPath := filepath.Join(authDir, fileName)
 
 	existingPayload := make(map[string]any)
 	if rawExisting, errRead := os.ReadFile(targetPath); errRead == nil {
 		_ = json.Unmarshal(rawExisting, &existingPayload)
 		oldRefresh, _ := existingPayload["refresh_token"].(string)
 		oldEmail, _ := existingPayload["email"].(string)
+		if email != "" && strings.TrimSpace(oldEmail) != "" && !strings.EqualFold(strings.TrimSpace(oldEmail), email) {
+			return false
+		}
 		if strings.TrimSpace(oldRefresh) == refresh && strings.TrimSpace(oldEmail) == email {
 			return false
 		}
@@ -160,10 +234,7 @@ func syncAntigravityVaultOnce(authDir string) bool {
 	if errMarshal != nil {
 		return false
 	}
-	if errMkdir := os.MkdirAll(authDir, 0o700); errMkdir != nil {
-		return false
-	}
-	tmpPath := targetPath + ".tmp"
+	tmpPath := fmt.Sprintf("%s.tmp.%d", targetPath, os.Getpid())
 	if errWrite := os.WriteFile(tmpPath, encoded, 0o600); errWrite != nil {
 		return false
 	}
@@ -171,8 +242,26 @@ func syncAntigravityVaultOnce(authDir string) bool {
 		_ = os.Remove(tmpPath)
 		return false
 	}
-	log.Infof("watcher: auto-synced Antigravity account from Windows Vault -> %s", fileName)
+	log.Infof("watcher: auto-synced Antigravity account from Windows Vault -> %s", filepath.Base(targetPath))
 	return true
+}
+
+func syncAntigravityVaultOnce(authDir string) bool {
+	authDir = strings.TrimSpace(authDir)
+	if authDir == "" {
+		return false
+	}
+	if st, err := os.Stat(authDir); err != nil || !st.IsDir() {
+		return false
+	}
+	blobs := enumerateAntigravityVaultBlobs()
+	updated := false
+	for _, b := range blobs {
+		if syncSingleAntigravityBlob(authDir, b) {
+			updated = true
+		}
+	}
+	return updated
 }
 
 func isTCPPortListening(addr string) bool {
@@ -206,6 +295,15 @@ func resolveACP2APIBinaryAndConfig() (string, string) {
 	return "", ""
 }
 
+func killProcessTreeWindows(pid int) {
+	if pid <= 0 {
+		return
+	}
+	killCmd := exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(pid))
+	killCmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	_ = killCmd.Run()
+}
+
 func (w *Watcher) startSupervisedACPBridge(ctx context.Context) {
 	binPath, cfgPath := resolveACP2APIBinaryAndConfig()
 	if binPath == "" || cfgPath == "" {
@@ -215,7 +313,7 @@ func (w *Watcher) startSupervisedACPBridge(ctx context.Context) {
 		var currentCmd *exec.Cmd
 		defer func() {
 			if currentCmd != nil && currentCmd.Process != nil {
-				_ = currentCmd.Process.Kill()
+				killProcessTreeWindows(currentCmd.Process.Pid)
 			}
 		}()
 		for {
@@ -246,14 +344,16 @@ func (w *Watcher) startPlatformAccountWatcher(ctx context.Context) {
 	if w == nil {
 		return
 	}
+	pCtx, pCancel := context.WithCancel(ctx)
+	w.platformCancel = pCancel
 	syncAntigravityVaultOnce(w.authDir)
-	w.startSupervisedACPBridge(ctx)
+	w.startSupervisedACPBridge(pCtx)
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {
-			case <-ctx.Done():
+			case <-pCtx.Done():
 				return
 			case <-ticker.C:
 				if w.stopped.Load() {

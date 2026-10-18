@@ -756,8 +756,14 @@ func TestFreeQuotaExhaustedDirectCreditsPreInjection(t *testing.T) {
 	if !antigravityShouldUseCreditsForRequest(context.Background(), cfg, auth, model) {
 		t.Fatal("expected antigravityShouldUseCreditsForRequest = true after QUOTA_EXHAUSTED before quotaResetTimeStamp")
 	}
+	if !antigravityShouldUseCreditsForRequest(context.Background(), cfg, auth, "claude-opus-5-5-high") {
+		t.Fatal("expected shared 3p-weekly pool to also activate credits for claude-opus-5-5-high")
+	}
+	if antigravityShouldUseCreditsForRequest(context.Background(), cfg, auth, "gemini-3.8-flash-high") {
+		t.Fatal("expected gemini model not to share 3p-weekly pool")
+	}
 
-	clearAntigravityFreeQuotaExhausted(auth, model)
+	clearAntigravityFreeQuotaExhausted(auth, "claude-opus-5-5-high")
 	if antigravityShouldUseCreditsForRequest(context.Background(), cfg, auth, model) {
 		t.Fatal("expected antigravityShouldUseCreditsForRequest = false after clearAntigravityFreeQuotaExhausted")
 	}
@@ -792,5 +798,40 @@ func TestMaybeRefreshAntigravityCreditsHint_RefreshesExpiredHint(t *testing.T) {
 	exec.maybeRefreshAntigravityCreditsHint(context.Background(), auth, "tok-test")
 	if fakeKV.setNXCount != 1 {
 		t.Fatalf("expected expired hint to trigger refresh lock (setNXCount = %d, want 1)", fakeKV.setNXCount)
+	}
+}
+
+func TestUpdateAntigravityCreditsBalance_EmptyArrayAndOpportunisticProjectID(t *testing.T) {
+	resetAntigravityCreditsRetryState()
+	t.Cleanup(resetAntigravityCreditsRetryState)
+	useFakeAntigravityKVClient(t, newFakeAntigravityKVClient(), false, nil)
+
+	rt := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		body := `{"cloudaicompanionProject":"aicode-consumers","paidTier":{"id":"g1-ultra-tier","availableCredits":[]}}`
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(body)),
+		}, nil
+	})
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", rt)
+	exec := &AntigravityExecutor{
+		cfg: &config.Config{
+			QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		ID:       "antigravity-empty-credits.json",
+		Provider: "antigravity",
+		Metadata: map[string]any{"access_token": "tok-test"},
+	}
+
+	exec.updateAntigravityCreditsBalance(ctx, auth, "tok-test")
+	hint, ok := cliproxyauth.GetAntigravityCreditsHint(auth.ID)
+	if !ok || !hint.Known || hint.Available {
+		t.Fatalf("expected Known=true, Available=false on empty availableCredits[], got ok=%v hint=%+v", ok, hint)
+	}
+	if gotProj := antigravityProjectIDFromAuth(auth); gotProj != "aicode-consumers" {
+		t.Fatalf("expected opportunistic project_id = aicode-consumers, got %q", gotProj)
 	}
 }
