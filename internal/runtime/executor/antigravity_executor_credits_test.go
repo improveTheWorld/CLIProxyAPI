@@ -31,6 +31,7 @@ func resetAntigravityCreditsRetryState() {
 	antigravityShortCooldownByAuth.Clear()
 	antigravityCreditsBalanceByAuth.Clear()
 	antigravityCreditsHintRefreshByID.Clear()
+	antigravityFreeQuotaExhaustedUntilByAuthModel.Clear()
 }
 
 type closeSignalReadCloser struct {
@@ -731,5 +732,65 @@ func TestParseMetaFloat(t *testing.T) {
 				t.Fatalf("parseMetaFloat() = %f, want %f", got, tt.wantVal)
 			}
 		})
+	}
+}
+
+func TestFreeQuotaExhaustedDirectCreditsPreInjection(t *testing.T) {
+	resetAntigravityCreditsRetryState()
+	t.Cleanup(resetAntigravityCreditsRetryState)
+
+	cfg := &config.Config{
+		QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+	}
+	auth := &cliproxyauth.Auth{ID: "antigravity-test@gmail.com", Provider: "antigravity"}
+	model := "claude-sonnet-5-5-high"
+
+	if antigravityShouldUseCreditsForRequest(context.Background(), cfg, auth, model) {
+		t.Fatal("expected antigravityShouldUseCreditsForRequest = false before 429")
+	}
+
+	resetTS := time.Now().UTC().Add(2 * time.Hour).Format(time.RFC3339)
+	body := []byte(`{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"QUOTA_EXHAUSTED","metadata":{"quotaResetTimeStamp":"` + resetTS + `"}}]}}`)
+	markAntigravityFreeQuotaExhausted(auth, model, body, nil)
+
+	if !antigravityShouldUseCreditsForRequest(context.Background(), cfg, auth, model) {
+		t.Fatal("expected antigravityShouldUseCreditsForRequest = true after QUOTA_EXHAUSTED before quotaResetTimeStamp")
+	}
+
+	clearAntigravityFreeQuotaExhausted(auth, model)
+	if antigravityShouldUseCreditsForRequest(context.Background(), cfg, auth, model) {
+		t.Fatal("expected antigravityShouldUseCreditsForRequest = false after clearAntigravityFreeQuotaExhausted")
+	}
+}
+
+func TestMaybeRefreshAntigravityCreditsHint_RefreshesExpiredHint(t *testing.T) {
+	resetAntigravityCreditsRetryState()
+	t.Cleanup(resetAntigravityCreditsRetryState)
+
+	fakeKV := newFakeAntigravityKVClient()
+	fakeKV.setNXResult = true
+	useFakeAntigravityKVClient(t, fakeKV, true, nil)
+
+	authID := "antigravity-expired-hint.json"
+	cliproxyauth.SetAntigravityCreditsHint(authID, cliproxyauth.AntigravityCreditsHint{
+		Known:     true,
+		Available: false,
+		UpdatedAt: time.Now().Add(-2 * antigravityCreditsHintRefreshInterval),
+	})
+
+	exec := &AntigravityExecutor{
+		cfg: &config.Config{
+			QuotaExceeded: config.QuotaExceeded{AntigravityCredits: true},
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		ID:       authID,
+		Provider: "antigravity",
+		Metadata: map[string]any{"access_token": "tok-test"},
+	}
+
+	exec.maybeRefreshAntigravityCreditsHint(context.Background(), auth, "tok-test")
+	if fakeKV.setNXCount != 1 {
+		t.Fatalf("expected expired hint to trigger refresh lock (setNXCount = %d, want 1)", fakeKV.setNXCount)
 	}
 }

@@ -285,6 +285,86 @@ func antigravityCreditsRetryEnabled(cfg *config.Config) bool {
 	return cfg != nil && cfg.QuotaExceeded.AntigravityCredits
 }
 
+var antigravityFreeQuotaExhaustedUntilByAuthModel sync.Map
+
+func antigravityFreeQuotaKey(auth *cliproxyauth.Auth, modelName string) string {
+	if auth == nil {
+		return ""
+	}
+	authID := strings.TrimSpace(auth.ID)
+	modelName = strings.ToLower(strings.TrimSpace(modelName))
+	if authID == "" || modelName == "" {
+		return ""
+	}
+	return authID + "|" + modelName
+}
+
+func antigravityIsFreeQuotaExhausted(auth *cliproxyauth.Auth, modelName string, now time.Time) bool {
+	key := antigravityFreeQuotaKey(auth, modelName)
+	if key == "" {
+		return false
+	}
+	val, ok := antigravityFreeQuotaExhaustedUntilByAuthModel.Load(key)
+	if !ok {
+		return false
+	}
+	resetAt, ok := val.(time.Time)
+	if !ok || !now.Before(resetAt) {
+		antigravityFreeQuotaExhaustedUntilByAuthModel.Delete(key)
+		return false
+	}
+	return true
+}
+
+func markAntigravityFreeQuotaExhausted(auth *cliproxyauth.Auth, modelName string, body []byte, retryAfter *time.Duration) {
+	key := antigravityFreeQuotaKey(auth, modelName)
+	if key == "" {
+		return
+	}
+	now := time.Now()
+	var resetAt time.Time
+	details := gjson.GetBytes(body, "error.details")
+	if details.Exists() && details.IsArray() {
+		for _, detail := range details.Array() {
+			if detail.Get("@type").String() != "type.googleapis.com/google.rpc.ErrorInfo" {
+				continue
+			}
+			ts := strings.TrimSpace(detail.Get("metadata.quotaResetTimeStamp").String())
+			if ts != "" {
+				if parsed, errParse := time.Parse(time.RFC3339, ts); errParse == nil && parsed.After(now) {
+					resetAt = parsed
+					break
+				}
+			}
+		}
+	}
+	if resetAt.IsZero() && retryAfter != nil && *retryAfter > 0 {
+		resetAt = now.Add(*retryAfter)
+	}
+	if resetAt.IsZero() {
+		resetAt = now.Add(15 * time.Minute)
+	}
+	antigravityFreeQuotaExhaustedUntilByAuthModel.Store(key, resetAt)
+}
+
+func clearAntigravityFreeQuotaExhausted(auth *cliproxyauth.Auth, modelName string) {
+	key := antigravityFreeQuotaKey(auth, modelName)
+	if key == "" {
+		return
+	}
+	antigravityFreeQuotaExhaustedUntilByAuthModel.Delete(key)
+}
+
+func antigravityShouldUseCreditsForRequest(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, modelName string) bool {
+	if !antigravityCreditsRetryEnabled(cfg) {
+		return false
+	}
+	if cliproxyauth.AntigravityCreditsRequested(ctx) {
+		return true
+	}
+	return antigravityIsFreeQuotaExhausted(auth, modelName, time.Now())
+}
+
 func clearAntigravityCreditsFailureState(auth *cliproxyauth.Auth) {
 	if auth == nil || strings.TrimSpace(auth.ID) == "" {
 		return
@@ -363,7 +443,7 @@ func (e *AntigravityExecutor) maybeRefreshAntigravityCreditsHint(ctx context.Con
 	if authID == "" {
 		return
 	}
-	if hint, ok := cliproxyauth.GetAntigravityCreditsHint(authID); ok && hint.Known {
+	if hint, ok := cliproxyauth.GetAntigravityCreditsHint(authID); ok && hint.Known && !hint.UpdatedAt.IsZero() && time.Since(hint.UpdatedAt) < antigravityCreditsHintRefreshInterval {
 		return
 	}
 	if strings.TrimSpace(accessToken) == "" {

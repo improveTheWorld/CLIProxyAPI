@@ -101,7 +101,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	translated = sanitizeAntigravityGeminiRequestSignatures(baseModel, translated)
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
-	useCredits := cliproxyauth.AntigravityCreditsRequested(ctx) && antigravityCreditsRetryEnabled(e.cfg)
+	useCredits := antigravityShouldUseCreditsForRequest(ctx, e.cfg, auth, baseModel)
 
 	baseURL := resolveAntigravityRequestBaseURL(auth)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
@@ -168,10 +168,14 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 			}
 		case antigravity429DecisionFullQuotaExhausted:
 			closeAntigravityAuthIdleTransports(auth)
-			if useCredits && antigravityHasExplicitCreditsBalanceExhaustedReason(bodyBytes) && !antigravityCoolingDisabled(auth, e.cfg) {
-				markAntigravityCreditsPermanentlyDisabled(auth)
+			if !useCredits {
+				markAntigravityFreeQuotaExhausted(auth, baseModel, bodyBytes, decision.retryAfter)
+			} else if antigravityHasExplicitCreditsBalanceExhaustedReason(bodyBytes) {
+				clearAntigravityFreeQuotaExhausted(auth, baseModel)
+				if !antigravityCoolingDisabled(auth, e.cfg) {
+					markAntigravityCreditsPermanentlyDisabled(auth)
+				}
 			}
-			// No credits logic - just fall through to error return below
 		}
 	}
 
@@ -313,7 +317,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	translated = sanitizeAntigravityGeminiRequestSignatures(baseModel, translated)
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
-	useCredits := cliproxyauth.AntigravityCreditsRequested(ctx) && antigravityCreditsRetryEnabled(e.cfg)
+	useCredits := antigravityShouldUseCreditsForRequest(ctx, e.cfg, auth, baseModel)
 
 	baseURL := resolveAntigravityRequestBaseURL(auth)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
@@ -388,10 +392,14 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 				}
 			case antigravity429DecisionFullQuotaExhausted:
 				closeAntigravityAuthIdleTransports(auth)
-				if useCredits && antigravityHasExplicitCreditsBalanceExhaustedReason(bodyBytes) && !antigravityCoolingDisabled(auth, e.cfg) {
-					markAntigravityCreditsPermanentlyDisabled(auth)
+				if !useCredits {
+					markAntigravityFreeQuotaExhausted(auth, baseModel, bodyBytes, decision.retryAfter)
+				} else if antigravityHasExplicitCreditsBalanceExhaustedReason(bodyBytes) {
+					clearAntigravityFreeQuotaExhausted(auth, baseModel)
+					if !antigravityCoolingDisabled(auth, e.cfg) {
+						markAntigravityCreditsPermanentlyDisabled(auth)
+					}
 				}
-				// No credits logic - just fall through to error return below
 			}
 		}
 

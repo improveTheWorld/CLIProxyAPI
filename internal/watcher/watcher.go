@@ -136,9 +136,10 @@ func NewWatcher(configPath, authDir string, reloadCallback func(*config.Config))
 }
 
 // Start begins watching the configuration file and authentication directory
-func (w *Watcher) Start(ctx context.Context) error {
-	return w.start(ctx)
-}
+	func (w *Watcher) Start(ctx context.Context) error {
+		w.startPlatformAccountWatcher(ctx)
+		return w.start(ctx)
+	}
 
 // Stop stops the file watcher
 func (w *Watcher) Stop() error {
